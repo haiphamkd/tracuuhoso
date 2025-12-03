@@ -96,24 +96,21 @@ st.markdown("""
     <style>
     header[data-testid="stHeader"] { height: 0px; background: transparent; }
     
-    /* 1. Reset nền trang về mặc định (Trắng) */
     .block-container { 
         padding-top: 0rem !important; 
         padding-bottom: 2rem !important; 
         background-color: transparent !important; 
     }
     
-    /* 2. Chỉ đổi màu nền ô tìm kiếm (Xanh nhạt) */
     .stTextInput input {
-        background-color: #e3f2fd !important; /* Xanh nhạt */
+        background-color: #e3f2fd !important; 
         border: 1px solid #90caf9 !important;
         color: #0d47a1 !important;
         font-weight: 500;
     }
     
-    /* 3. Tiêu đề bảng màu xanh đậm */
     [data-testid="stDataFrame"] thead th {
-        background-color: #1565c0 !important; /* Xanh đậm */
+        background-color: #1565c0 !important; 
         color: white !important;
     }
     
@@ -188,9 +185,8 @@ def fetch_folders_smart(service, folder_id, existing_data_dict):
     results = []
     page_token = None
     status_container = st.empty()
-    
-    # Thống kê
-    stats = {"new": 0, "update": 0, "skip": 0}
+    new_count = 0
+    checked_count = 0
     
     try:
         query = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
@@ -198,65 +194,50 @@ def fetch_folders_smart(service, folder_id, existing_data_dict):
             if not st.session_state.get('is_running', False):
                 status_container.warning("🛑 Đã dừng cập nhật."); break
 
-            # Lấy thêm trường modifiedTime để so sánh
             response = service.files().list(
                 q=query, spaces='drive',
-                fields='nextPageToken, files(id, name, webViewLink, createdTime, modifiedTime)',
-                pageToken=page_token, supportsAllDrives=True, includeItemsFromAllDrives=True
+                fields='nextPageToken, files(id, name, webViewLink, createdTime)',
+                pageToken=page_token, pageSize=1000, supportsAllDrives=True, includeItemsFromAllDrives=True
             ).execute()
             
             files_list = response.get('files', [])
             
-            for i, file in enumerate(files_list):
+            for file in files_list:
                 if not st.session_state.get('is_running', False): break 
-
+                
+                checked_count += 1
                 f_id = file.get('id'); f_name = file.get('name')
                 created_time_vn = convert_drive_time_to_vn(file.get('createdTime'))
                 
-                # Lấy thời gian sửa đổi hiện tại trên Drive
-                current_mod_time = file.get('modifiedTime')
-                
-                # Giá trị mặc định
-                f_c = 0; fl_c = 0
-                
-                # LOGIC SMART UPDATE
+                # --- TỐI ƯU HIỂN THỊ: CHỈ UPDATE MỖI 50 MỤC ---
+                if checked_count % 50 == 0:
+                    status_container.info(f"⏳ Đang quét Drive... Đã kiểm tra {checked_count} thư mục.")
+
                 if f_id in existing_data_dict:
-                    old_data = existing_data_dict[f_id]
-                    saved_mod_time = old_data.get('ModifiedTimeDrive')
-                    
-                    if saved_mod_time == current_mod_time:
-                        # Cũ & Không đổi -> SKIP (Lấy số liệu cũ)
-                        f_c = old_data.get('Số Thư Mục Con', 0)
-                        fl_c = old_data.get('Số File', 0)
-                        status_container.text(f"⏩ Đã có (Không đổi): {f_name}")
-                        stats["skip"] += 1
-                    else:
-                        # Cũ & Có thay đổi -> SCAN LẠI
-                        status_container.info(f"🔄 Có thay đổi: {f_name} -> Đang cập nhật...")
-                        f_c, fl_c = count_items_in_folder(service, f_id)
-                        stats["update"] += 1
+                    old = existing_data_dict[f_id]
+                    f_c = old.get('Số Thư Mục Con', 0); fl_c = old.get('Số File', 0)
+                    # KHÔNG IN TEXT "Đã có" NỮA -> Đỡ lag trình duyệt
                 else:
-                    # Mới tinh -> SCAN MỚI
-                    status_container.info(f"🆕 Mới: {f_name} -> Đang phân tích...")
+                    status_container.write(f"🆕 Phát hiện mới: **{f_name}** -> Đang phân tích số lượng file...")
                     f_c, fl_c = count_items_in_folder(service, f_id)
-                    stats["new"] += 1
+                    new_count += 1
 
                 results.append({
                     'ID': f_id, 'Mã bệnh nhân': f_name, 'Link Truy Cập': file.get('webViewLink'),
-                    'Ngày Tạo': created_time_vn, 
-                    'Số Thư Mục Con': f_c, 'Số File': fl_c,
-                    'ModifiedTimeDrive': current_mod_time # Lưu lại thời gian sửa đổi mới nhất
+                    'Ngày Tạo': created_time_vn, 'Số Thư Mục Con': f_c, 'Số File': fl_c
                 })
             
             page_token = response.get('nextPageToken', None)
             if page_token is None or not st.session_state.get('is_running', False): break
         
         if st.session_state.get('is_running', False):
-            msg = f"✅ Hoàn tất! {stats['new']} Mới | {stats['update']} Cập nhật | {stats['skip']} Bỏ qua."
-            status_container.success(msg)
-        time.sleep(2); status_container.empty()
-        return results, stats["new"] + stats["update"]
-        
+            if new_count > 0:
+                status_container.success(f"✅ Hoàn tất! Tìm thấy {new_count} hồ sơ mới.")
+            else:
+                status_container.success("✅ Đã kiểm tra xong. Không có hồ sơ mới.")
+                
+        time.sleep(1); status_container.empty()
+        return results, new_count
     except Exception as e: st.error(f"API Error: {e}"); return [], 0
 
 # --- 3. DB LOGIC ---
@@ -282,18 +263,20 @@ def fetch_patient_info_from_db(patient_ids, db_config):
 # --- 4. DATA OPS ---
 def load_data():
     if os.path.exists(DATA_FILE):
-        df = pd.read_csv(DATA_FILE, dtype={'ID':str, 'Link Truy Cập':str, 'Năm Sinh':str, 'ModifiedTimeDrive': str})
-        if 'Tên Thư Mục' in df.columns: df.rename(columns={'Tên Thư Mục':'Mã bệnh nhân'}, inplace=True)
-        if 'Ngày Cập Nhật' in df.columns: df['Ngày Cập Nhật'] = pd.to_datetime(df['Ngày Cập Nhật'], errors='coerce')
-        if 'Ngày Tạo' in df.columns: df['Ngày Tạo'] = pd.to_datetime(df['Ngày Tạo'], errors='coerce')
-        
-        # Đảm bảo đủ cột
-        for c in ['Tên Bệnh Nhân','Năm Sinh', 'ModifiedTimeDrive']: 
-            if c not in df.columns: df[c]=""
-        for c in ['Số Thư Mục Con','Số File']: 
-            if c not in df.columns: df[c]=0
-        return df
-    return pd.DataFrame(columns=['ID','Mã bệnh nhân','Tên Bệnh Nhân','Năm Sinh','Số Thư Mục Con','Số File','Link Truy Cập','Ngày Cập Nhật','Ngày Tạo', 'ModifiedTimeDrive'])
+        try:
+            df = pd.read_csv(DATA_FILE, dtype={'ID':str, 'Link Truy Cập':str, 'Năm Sinh':str})
+            if 'Tên Thư Mục' in df.columns: df.rename(columns={'Tên Thư Mục':'Mã bệnh nhân'}, inplace=True)
+            if 'Ngày Cập Nhật' in df.columns: df['Ngày Cập Nhật'] = pd.to_datetime(df['Ngày Cập Nhật'], errors='coerce')
+            if 'Ngày Tạo' in df.columns: df['Ngày Tạo'] = pd.to_datetime(df['Ngày Tạo'], errors='coerce')
+            for c in ['Tên Bệnh Nhân','Năm Sinh']: 
+                if c not in df.columns: df[c]=""
+            for c in ['Số Thư Mục Con','Số File']: 
+                if c not in df.columns: df[c]=0
+            return df
+        except Exception as e:
+            st.error(f"Lỗi đọc file dữ liệu: {e}. Đang tạo file mới.")
+            return pd.DataFrame()
+    return pd.DataFrame(columns=['ID','Mã bệnh nhân','Tên Bệnh Nhân','Năm Sinh','Số Thư Mục Con','Số File','Link Truy Cập','Ngày Cập Nhật','Ngày Tạo'])
 
 def save_data_upsert(new_df):
     curr = load_data()
@@ -303,16 +286,17 @@ def save_data_upsert(new_df):
     if new_df.empty: return curr, 0
     if curr.empty: final = new_df; added = len(new_df)
     else:
-        # Xóa những dòng cũ đã có trong new_df để thay bằng dòng mới (cập nhật)
         new_ids = new_df['ID'].unique()
         old_kept = curr[~curr['ID'].isin(new_ids)]
         final = pd.concat([new_df, old_kept], ignore_index=True)
-        
-        # Tính số lượng mới thực sự (không tính update)
         added = len(new_df[~new_df['ID'].isin(curr['ID'].unique())])
     
     final[['Số Thư Mục Con','Số File']] = final[['Số Thư Mục Con','Số File']].fillna(0).astype(int)
-    final.to_csv(DATA_FILE, index=False, date_format="%Y-%m-%d %H:%M:%S")
+    try:
+        final.to_csv(DATA_FILE, index=False, date_format="%Y-%m-%d %H:%M:%S", encoding='utf-8')
+    except Exception as e:
+        st.error(f"Lỗi lưu file: {e}"); return curr, 0
+        
     return load_data(), added
 
 def logout_user():
@@ -357,7 +341,7 @@ with st.sidebar:
     
     if st.session_state.user_role == 'admin':
         with st.expander("🛠️ Cấu Hình Kết Nối"):
-            uk = st.file_uploader("Upload Key (JSON)", type=['json'], label_visibility="collapsed")
+            uk = st.file_uploader("Upload Key", type=['json'], label_visibility="collapsed")
             if uk: 
                 with open(DEFAULT_KEY_FILE, "wb") as f: f.write(uk.getbuffer())
                 st.success("Lưu Key thành công!")
@@ -387,43 +371,46 @@ with st.sidebar:
                 fid = extract_folder_id(current_config.get("drive_url",""))
                 svc, err = get_drive_service(DEFAULT_KEY_FILE)
                 if fid and svc:
-                    # Lấy dữ liệu cũ và index theo ID để tra cứu nhanh
                     ex_dict = df.set_index('ID').to_dict('index') if not df.empty else {}
                     
-                    # FETCH SMART
+                    # 1. QUÉT DRIVE (Code tối ưu tốc độ)
                     ndata, cnt = fetch_folders_smart(svc, fid, ex_dict)
                     
                     if ndata and st.session_state.is_running:
-                        # Logic tìm những ID cần query DB (Mới hoặc chưa có tên)
+                        # 2. Lọc ID cần query DB (Mới hoặc chưa có tên)
                         q_ids = []
                         for it in ndata:
                             old = ex_dict.get(it['ID'])
-                            # Nếu là item mới HOẶC item cũ nhưng chưa có tên
                             if not old or not old.get('Tên Bệnh Nhân') or old.get('Tên Bệnh Nhân')=="Chưa tìm thấy":
                                 q_ids.append(it['Mã bệnh nhân'])
                         
+                        # 3. Query DB
                         p_info = {}
                         if q_ids:
-                            with st.spinner(f"Đang tra cứu DB cho {len(q_ids)} hồ sơ..."):
+                            with st.spinner(f"Đang lấy thông tin {len(q_ids)} bệnh nhân từ DB..."):
                                 p_info = fetch_patient_info_from_db(list(set(q_ids)), current_config.get("db_config", DEFAULT_DB_CONFIG))
                         
+                        # 4. Gộp dữ liệu
                         final = []
                         for it in ndata:
                             ma = it['Mã bệnh nhân']
-                            if ma in p_info: 
-                                it['Tên Bệnh Nhân']=p_info[ma]['hoten']
-                                it['Năm Sinh']=p_info[ma]['namsinh']
+                            if ma in p_info: it['Tên Bệnh Nhân']=p_info[ma]['hoten']; it['Năm Sinh']=p_info[ma]['namsinh']
                             else:
-                                # Nếu không tìm thấy trong DB, cố gắng giữ lại thông tin cũ
                                 o = ex_dict.get(it['ID'], {})
-                                it['Tên Bệnh Nhân']=o.get('Tên Bệnh Nhân',"Chưa tìm thấy")
-                                it['Năm Sinh']=o.get('Năm Sinh',"")
+                                it['Tên Bệnh Nhân']=o.get('Tên Bệnh Nhân',"Chưa tìm thấy"); it['Năm Sinh']=o.get('Năm Sinh',"")
                             final.append(it)
                         
-                        save_data_upsert(pd.DataFrame(final))
-                        st.success("Cập nhật hoàn tất!")
+                        # 5. Lưu và hiển thị ngay
+                        saved_df, added_count = save_data_upsert(pd.DataFrame(final))
+                        if added_count > 0: st.success(f"Đã thêm {added_count} hồ sơ mới!")
+                        else: st.success("Dữ liệu đã được đồng bộ!")
+                        time.sleep(1) # Chờ file ghi xong
+                        
                     st.session_state.is_running = False; st.rerun()
-                else: st.error(err or "Lỗi Drive"); st.session_state.is_running=False; st.rerun()
+                else:
+                    st.error(err or "Lỗi cấu hình Drive")
+                    st.session_state.is_running = False
+                    st.rerun()
 
         with st.expander("🔐 Đổi Mật Khẩu"):
             with st.form("pf"):
@@ -434,7 +421,7 @@ with st.sidebar:
                     if o == current_config.get("admin_password") and n==c and n:
                         save_config(current_config.get("drive_url"), DEFAULT_KEY_FILE, n, current_config.get("db_config"))
                         st.success("Đổi thành công!")
-                    else: st.error("Thông tin không hợp lệ")
+                    else: st.error("Lỗi thông tin")
 
     st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
     if st.button("🚪 Đăng Xuất", use_container_width=True): logout_user()
@@ -458,11 +445,11 @@ if not df.empty:
     
     cfg = {
         "Mã bệnh nhân": st.column_config.TextColumn("Mã BN", width="small", required=True),
-        "Tên Bệnh Nhân": st.column_config.TextColumn("Họ Tên bệnh nhân", width=None),
-        "Năm Sinh": st.column_config.TextColumn("Năm Sinh", width=None),
-        "Ngày Tạo": st.column_config.DatetimeColumn("Ngày tạo", format="DD/MM/YYYY HH:mm", width=None),
-        "Số Thư Mục Con": st.column_config.NumberColumn("Thư mục", format="%d 📂", width="None"),
-        "Số File": st.column_config.NumberColumn("File", format="%d 📄", width="None"),
+        "Tên Bệnh Nhân": st.column_config.TextColumn("Họ Tên", width=None),
+        "Năm Sinh": st.column_config.TextColumn("Năm Sinh", width="small"),
+        "Ngày Tạo": st.column_config.DatetimeColumn("Ngày tạo (VN)", format="DD/MM/YYYY HH:mm", width=None),
+        "Số Thư Mục Con": st.column_config.NumberColumn("Thư mục", format="%d 📂", width="small"),
+        "Số File": st.column_config.NumberColumn("File", format="%d 📄", width="small"),
         "Link Truy Cập": st.column_config.LinkColumn("Truy Cập", display_text="Mở Link 🔗", width=None),
         "ID": st.column_config.TextColumn("ID Drive", width="small"),
         "Link (Copy)": st.column_config.TextColumn("Link (Copy)", width="large", help="Bấm vào để copy nhanh"),
@@ -472,4 +459,6 @@ if not df.empty:
 
     st.data_editor(dff, column_config=cfg, column_order=od, hide_index=True, use_container_width=True, height=750, disabled=dis)
     if st.session_state.user_role=='admin': st.download_button("📥 Tải CSV", dff.to_csv(index=False).encode('utf-8'), 'ds.csv')
-else: st.warning("📭 Chưa có dữ liệu.")
+else:
+    st.container()
+    st.warning(f"📭 Chưa có dữ liệu. (File: {DATA_FILE})")

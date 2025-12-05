@@ -209,14 +209,12 @@ def fetch_folders_smart(service, folder_id, existing_data_dict):
                 f_id = file.get('id'); f_name = file.get('name')
                 created_time_vn = convert_drive_time_to_vn(file.get('createdTime'))
                 
-                # --- TỐI ƯU HIỂN THỊ: CHỈ UPDATE MỖI 50 MỤC ---
                 if checked_count % 50 == 0:
                     status_container.info(f"⏳ Đang quét Drive... Đã kiểm tra {checked_count} thư mục.")
 
                 if f_id in existing_data_dict:
                     old = existing_data_dict[f_id]
                     f_c = old.get('Số Thư Mục Con', 0); fl_c = old.get('Số File', 0)
-                    # KHÔNG IN TEXT "Đã có" NỮA -> Đỡ lag trình duyệt
                 else:
                     status_container.write(f"🆕 Phát hiện mới: **{f_name}** -> Đang phân tích số lượng file...")
                     f_c, fl_c = count_items_in_folder(service, f_id)
@@ -240,22 +238,40 @@ def fetch_folders_smart(service, folder_id, existing_data_dict):
         return results, new_count
     except Exception as e: st.error(f"API Error: {e}"); return [], 0
 
-# --- 3. DB LOGIC ---
+# --- 3. DB LOGIC (FIXED) ---
 def fetch_patient_info_from_db(patient_ids, db_config):
     if not patient_ids: return {}
     pmap = {}; conn = None
+    
+    # Chuẩn hóa list ID: loại bỏ khoảng trắng, ép về string
+    clean_ids = [str(pid).strip() for pid in patient_ids if pid]
+    
+    if not clean_ids: return {}
+
     try:
         conn = psycopg2.connect(
             user=db_config['user'], password=db_config['password'],
             host=db_config['host'], port=db_config['port'], database=db_config['database'])
         cur = conn.cursor()
+        
         chunk = 500
-        for i in range(0, len(patient_ids), chunk):
-            c = patient_ids[i:i+chunk]
+        for i in range(0, len(clean_ids), chunk):
+            c = clean_ids[i:i+chunk]
+            # Sử dụng tham số %s để tránh lỗi SQL Injection và format
             p = ','.join(['%s']*len(c))
-            cur.execute(f"SELECT mabn, hoten, namsinh FROM medibv.btdbn WHERE mabn IN ({p})", tuple(c))
-            for r in cur.fetchall(): pmap[str(r[0]).strip()] = {'hoten':r[1], 'namsinh':r[2]}
-    except Exception as e: st.error(f"DB Error: {e}")
+            
+            # Query chuẩn hóa trim() để so sánh chính xác hơn
+            query = f"SELECT TRIM(mabn), hoten, namsinh FROM medibv.btdbn WHERE TRIM(mabn) IN ({p})"
+            
+            cur.execute(query, tuple(c))
+            
+            for r in cur.fetchall(): 
+                # r[0] là mabn, r[1] là hoten, r[2] là namsinh
+                mabn_db = str(r[0]).strip()
+                pmap[mabn_db] = {'hoten': r[1], 'namsinh': r[2]}
+                
+    except Exception as e: 
+        st.error(f"DB Error: {e}")
     finally:
         if conn: conn.close()
     return pmap
@@ -373,38 +389,58 @@ with st.sidebar:
                 if fid and svc:
                     ex_dict = df.set_index('ID').to_dict('index') if not df.empty else {}
                     
-                    # 1. QUÉT DRIVE (Code tối ưu tốc độ)
+                    # 1. QUÉT DRIVE
                     ndata, cnt = fetch_folders_smart(svc, fid, ex_dict)
                     
                     if ndata and st.session_state.is_running:
                         # 2. Lọc ID cần query DB (Mới hoặc chưa có tên)
+                        # Fix logic: Luôn query lại nếu chưa có tên, bất kể là mới hay cũ
                         q_ids = []
                         for it in ndata:
+                            mabn = str(it['Mã bệnh nhân']).strip()
                             old = ex_dict.get(it['ID'])
-                            if not old or not old.get('Tên Bệnh Nhân') or old.get('Tên Bệnh Nhân')=="Chưa tìm thấy":
-                                q_ids.append(it['Mã bệnh nhân'])
+                            
+                            # Nếu là hồ sơ mới HOẶC hồ sơ cũ nhưng chưa có tên
+                            if not old or not old.get('Tên Bệnh Nhân') or str(old.get('Tên Bệnh Nhân')).strip() == "" or old.get('Tên Bệnh Nhân') == "Chưa tìm thấy":
+                                q_ids.append(mabn)
+                        
+                        # Loại bỏ trùng lặp
+                        q_ids = list(set(q_ids))
                         
                         # 3. Query DB
                         p_info = {}
                         if q_ids:
-                            with st.spinner(f"Đang lấy thông tin {len(q_ids)} bệnh nhân từ DB..."):
-                                p_info = fetch_patient_info_from_db(list(set(q_ids)), current_config.get("db_config", DEFAULT_DB_CONFIG))
+                            with st.spinner(f"Đang tìm thông tin {len(q_ids)} bệnh nhân trong DB..."):
+                                p_info = fetch_patient_info_from_db(q_ids, current_config.get("db_config", DEFAULT_DB_CONFIG))
                         
-                        # 4. Gộp dữ liệu
+                        # 4. Gộp dữ liệu (Update lại danh sách hiển thị)
                         final = []
                         for it in ndata:
-                            ma = it['Mã bệnh nhân']
-                            if ma in p_info: it['Tên Bệnh Nhân']=p_info[ma]['hoten']; it['Năm Sinh']=p_info[ma]['namsinh']
+                            ma = str(it['Mã bệnh nhân']).strip()
+                            
+                            # Ưu tiên lấy từ DB mới query được
+                            if ma in p_info:
+                                it['Tên Bệnh Nhân'] = p_info[ma]['hoten']
+                                it['Năm Sinh'] = p_info[ma]['namsinh']
                             else:
+                                # Nếu không có trong DB, giữ lại thông tin cũ (nếu có)
                                 o = ex_dict.get(it['ID'], {})
-                                it['Tên Bệnh Nhân']=o.get('Tên Bệnh Nhân',"Chưa tìm thấy"); it['Năm Sinh']=o.get('Năm Sinh',"")
+                                it['Tên Bệnh Nhân'] = o.get('Tên Bệnh Nhân', "")
+                                it['Năm Sinh'] = o.get('Năm Sinh', "")
+                                
                             final.append(it)
                         
                         # 5. Lưu và hiển thị ngay
                         saved_df, added_count = save_data_upsert(pd.DataFrame(final))
-                        if added_count > 0: st.success(f"Đã thêm {added_count} hồ sơ mới!")
-                        else: st.success("Dữ liệu đã được đồng bộ!")
-                        time.sleep(1) # Chờ file ghi xong
+                        
+                        if added_count > 0:
+                            st.success(f"Đã thêm {added_count} hồ sơ mới!")
+                        elif len(p_info) > 0:
+                            st.success(f"Đã cập nhật thông tin cho {len(p_info)} bệnh nhân!")
+                        else:
+                            st.success("Dữ liệu đã được đồng bộ!")
+                            
+                        time.sleep(1)
                         
                     st.session_state.is_running = False; st.rerun()
                 else:

@@ -95,25 +95,21 @@ def save_config(url, key_path, password, db_config):
 st.markdown("""
     <style>
     header[data-testid="stHeader"] { height: 0px; background: transparent; }
-    
     .block-container { 
         padding-top: 0rem !important; 
         padding-bottom: 2rem !important; 
         background-color: transparent !important; 
     }
-    
     .stTextInput input {
         background-color: #e3f2fd !important; 
         border: 1px solid #90caf9 !important;
         color: #0d47a1 !important;
         font-weight: 500;
     }
-    
     [data-testid="stDataFrame"] thead th {
         background-color: #1565c0 !important; 
         color: white !important;
     }
-    
     h1 { margin-top: -1rem !important; padding-bottom: 1rem !important; font-size: 2rem !important; color: #0d47a1 !important; z-index: 999; }
     div[data-testid="stVerticalBlock"] > div:has(div.sticky-marker) {
         position: sticky; top: 0rem; background-color: white; z-index: 990;
@@ -131,7 +127,6 @@ st.markdown("""
     .stop-btn button { background-color: #d32f2f !important; color: white !important; }
     .stop-btn button:hover { background-color: #b71c1c !important; }
     [data-testid="stDataFrame"] { border: 1px solid #dbe4ef; border-radius: 8px; overflow: hidden; }
-    
     .logout-btn button {
         background-color: white !important; color: #d32f2f !important; border: 2px solid #ef9a9a !important; margin-top: 5px !important; box-shadow: none !important;
     }
@@ -238,14 +233,16 @@ def fetch_folders_smart(service, folder_id, existing_data_dict):
         return results, new_count
     except Exception as e: st.error(f"API Error: {e}"); return [], 0
 
-# --- 3. DB LOGIC (FIXED) ---
+# --- 3. DB LOGIC (FIXED CAST TYPE) ---
 def fetch_patient_info_from_db(patient_ids, db_config):
     if not patient_ids: return {}
     pmap = {}; conn = None
     
-    # Chuẩn hóa list ID: loại bỏ khoảng trắng, ép về string
-    clean_ids = [str(pid).strip() for pid in patient_ids if pid]
+    # Debug: In ra danh sách ID đang tìm
+    # st.write(f"🔍 Debug DB: Đang tìm {len(patient_ids)} ID: {patient_ids[:5]}...") 
     
+    # Chuẩn hóa ID
+    clean_ids = [str(pid).strip() for pid in patient_ids if pid]
     if not clean_ids: return {}
 
     try:
@@ -257,16 +254,19 @@ def fetch_patient_info_from_db(patient_ids, db_config):
         chunk = 500
         for i in range(0, len(clean_ids), chunk):
             c = clean_ids[i:i+chunk]
-            # Sử dụng tham số %s để tránh lỗi SQL Injection và format
             p = ','.join(['%s']*len(c))
             
-            # Query chuẩn hóa trim() để so sánh chính xác hơn
-            query = f"SELECT TRIM(mabn), hoten, namsinh FROM medibv.btdbn WHERE TRIM(mabn) IN ({p})"
+            # --- QUAN TRỌNG: CAST AS TEXT để so sánh chuỗi ---
+            # DB Mabn có thể là varchar hoặc char, cần ép về text và trim để so sánh
+            query = f"SELECT TRIM(CAST(mabn AS TEXT)), hoten, namsinh FROM medibv.btdbn WHERE TRIM(CAST(mabn AS TEXT)) IN ({p})"
             
             cur.execute(query, tuple(c))
+            rows = cur.fetchall()
             
-            for r in cur.fetchall(): 
-                # r[0] là mabn, r[1] là hoten, r[2] là namsinh
+            # Debug: In ra số lượng tìm thấy
+            # st.write(f"--> Tìm thấy: {len(rows)} kết quả trong DB")
+            
+            for r in rows: 
                 mabn_db = str(r[0]).strip()
                 pmap[mabn_db] = {'hoten': r[1], 'namsinh': r[2]}
                 
@@ -308,6 +308,7 @@ def save_data_upsert(new_df):
         added = len(new_df[~new_df['ID'].isin(curr['ID'].unique())])
     
     final[['Số Thư Mục Con','Số File']] = final[['Số Thư Mục Con','Số File']].fillna(0).astype(int)
+    
     try:
         final.to_csv(DATA_FILE, index=False, date_format="%Y-%m-%d %H:%M:%S", encoding='utf-8')
     except Exception as e:
@@ -394,52 +395,44 @@ with st.sidebar:
                     
                     if ndata and st.session_state.is_running:
                         # 2. Lọc ID cần query DB (Mới hoặc chưa có tên)
-                        # Fix logic: Luôn query lại nếu chưa có tên, bất kể là mới hay cũ
                         q_ids = []
                         for it in ndata:
                             mabn = str(it['Mã bệnh nhân']).strip()
                             old = ex_dict.get(it['ID'])
                             
-                            # Nếu là hồ sơ mới HOẶC hồ sơ cũ nhưng chưa có tên
+                            # Logic: Luôn query lại nếu chưa có tên
                             if not old or not old.get('Tên Bệnh Nhân') or str(old.get('Tên Bệnh Nhân')).strip() == "" or old.get('Tên Bệnh Nhân') == "Chưa tìm thấy":
                                 q_ids.append(mabn)
                         
-                        # Loại bỏ trùng lặp
-                        q_ids = list(set(q_ids))
-                        
                         # 3. Query DB
+                        q_ids = list(set(q_ids))
                         p_info = {}
-                        if q_ids:
-                            with st.spinner(f"Đang tìm thông tin {len(q_ids)} bệnh nhân trong DB..."):
-                                p_info = fetch_patient_info_from_db(q_ids, current_config.get("db_config", DEFAULT_DB_CONFIG))
                         
-                        # 4. Gộp dữ liệu (Update lại danh sách hiển thị)
+                        if q_ids:
+                            # Hiển thị thông báo để debug nếu cần
+                            with st.expander("🔍 Chi tiết kết nối DB", expanded=True):
+                                st.write(f"Đang tìm {len(q_ids)} hồ sơ trong DB...")
+                                p_info = fetch_patient_info_from_db(q_ids, current_config.get("db_config", DEFAULT_DB_CONFIG))
+                                st.write(f"✅ Tìm thấy: {len(p_info)} kết quả.")
+                        
+                        # 4. Gộp dữ liệu
                         final = []
                         for it in ndata:
                             ma = str(it['Mã bệnh nhân']).strip()
-                            
-                            # Ưu tiên lấy từ DB mới query được
                             if ma in p_info:
                                 it['Tên Bệnh Nhân'] = p_info[ma]['hoten']
                                 it['Năm Sinh'] = p_info[ma]['namsinh']
                             else:
-                                # Nếu không có trong DB, giữ lại thông tin cũ (nếu có)
                                 o = ex_dict.get(it['ID'], {})
                                 it['Tên Bệnh Nhân'] = o.get('Tên Bệnh Nhân', "")
                                 it['Năm Sinh'] = o.get('Năm Sinh', "")
-                                
                             final.append(it)
                         
-                        # 5. Lưu và hiển thị ngay
                         saved_df, added_count = save_data_upsert(pd.DataFrame(final))
                         
-                        if added_count > 0:
-                            st.success(f"Đã thêm {added_count} hồ sơ mới!")
-                        elif len(p_info) > 0:
-                            st.success(f"Đã cập nhật thông tin cho {len(p_info)} bệnh nhân!")
-                        else:
-                            st.success("Dữ liệu đã được đồng bộ!")
-                            
+                        if added_count > 0: st.success(f"Đã thêm {added_count} hồ sơ mới!")
+                        elif len(p_info) > 0: st.success(f"Đã cập nhật thông tin cho {len(p_info)} bệnh nhân!")
+                        else: st.success("Dữ liệu đã được đồng bộ!")
                         time.sleep(1)
                         
                     st.session_state.is_running = False; st.rerun()
